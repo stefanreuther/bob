@@ -42,12 +42,17 @@ def __ls(*args, **kwargs):
      from .cmds.misc import doLS
      doLS(*args, **kwargs)
 
+def __queryscm(*args, **kwargs):
+     from .cmds.misc import doQuerySCM
+     doQuerySCM(*args, **kwargs)
+
 availableCommands = {
     "build"  : (__build, "Build (sub-)packages in release mode"),
     "dev"        : (__develop, "Build (sub-)packages in development mode"),
     "clean"  : (__clean, "Delete unused src/build/dist paths"),
     "jenkins" : (__jenkins, "Configure Jenkins server"),
     "ls"         : (__ls, "List package hierarchy"),
+    "query-scm" : (__queryscm, "Query SCM"),
 }
 
 def doHelp(extended, fd):

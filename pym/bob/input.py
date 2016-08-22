@@ -63,6 +63,18 @@ def checkGlobList(name, allowed):
         elif fnmatch.fnmatchcase(name, a): ok = True
     return ok
 
+def _matchUrl(query, module):
+    # Let's say the URL (...of a changed file) is "http://foo/bar/baz",
+    # so we want to accept that if we have a module at "http://foo/bar".
+    # Thus:
+    #  - query url starts with module url
+    #  - either
+    #    - both are identical
+    #    - query url ends with '/'
+    #    - module url has '/' after query url
+    return query.startswith(module) and (len(query) == len(module) or (len(module) > 0 and module[-1] == '/') or (query[len(module)] == '/'))
+
+
 class StringParser:
     """Utility class for complex string parsing/manipulation"""
 
@@ -504,6 +516,12 @@ fi
     def hasJenkinsPlugin(self):
         return True
 
+    def getUrls(self):
+        return [self.__url]
+
+    def matchUrls(self, urls):
+        return [u for u in self.getUrls() if u in urls]
+
 class SvnScm(BaseScm):
     def __init__(self, spec):
         super().__init__(spec)
@@ -603,6 +621,18 @@ fi
     def hasJenkinsPlugin(self):
         return True
 
+    def getUrls(self):
+        return [u['url'] for u in self.__modules]
+
+    def matchUrls(self, urls):
+        # Match URLs.
+        result = []
+        for m in self.getUrls():
+            for u in urls:
+                if _matchUrl(u, m):
+                    result.append(m)
+        return result
+
 
 class CvsScm(BaseScm):
     # Checkout using CVS
@@ -684,6 +714,21 @@ fi
 
     def hasJenkinsPlugin(self):
         return False
+
+    def getUrls(self):
+        return [self.__cvsroot + '/' + self.__module]
+
+    def matchUrls(self, urls):
+        # CVS URLs include access method and user name. Match after removing those.
+        # For example, ":ext:user@host:/cvsroot/module" will be treated as "host:/cvsroot/module"
+        path = self.__cvsroot + '/' + self.__module
+        m = re.match('^[^/]*@(.*)', path)
+        if m:
+            path = m.group(1)
+        for u in urls:
+            if _matchUrl(u, path):
+                return self.getUrls()
+        return []
 
 
 class UrlScm(BaseScm):
@@ -808,6 +853,12 @@ fi
 
     def hasJenkinsPlugin(self):
         return False
+
+    def getUrls(self):
+        return [self.__url]
+
+    def matchUrls(self, urls):
+        return [u for u in self.getUrls() if u in urls]
 
 
 def Scm(spec):
@@ -1243,6 +1294,9 @@ class CheckoutStep(Step):
             self.__deterministic = True
 
         super().__init__(package, pathFormatter, sandbox, "src", env, tools)
+
+    def getScmList(self):
+        return self.__scmList
 
     def isCheckoutStep(self):
         return True

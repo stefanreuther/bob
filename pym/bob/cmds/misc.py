@@ -85,3 +85,49 @@ def doLS(argv, bobRoot):
     else:
         for p in roots: print(p.getName())
 
+def doQuerySCM(argv, bobRoot):
+    # Recursive query function
+    def queryRecursive(packages, prefix, printer, match):
+        for p in packages:
+            name = p.getName()
+            for scm in p.getCheckoutStep().getScmList():
+                if len(match) == 0:
+                    urls = scm.getUrls()
+                else:
+                    urls = scm.matchUrls(match)
+                for url in urls:
+                    printer(prefix+name, url)
+            queryRecursive([d.getPackage() for d in p.getAllDepSteps()], prefix + name + "/", printer, match)
+
+    # Configure the parser
+    parser = argparse.ArgumentParser(prog="bob query-scm", description='Lists all packages and their SCM URLs.')
+    parser.add_argument('--show', help='Select output format (both, name/package, url)', default='both', metavar='MODE')
+    parser.add_argument('-f', '--filter', help='Show only packages that match a SCM URL', action='append', metavar='URL', default=[])
+
+    group = parser.add_mutually_exclusive_group()
+    group.add_argument('--sandbox', action='store_true', default=True,
+        help="Enable sandboxing")
+    group.add_argument('--no-sandbox', action='store_false', dest='sandbox',
+        help="Disable sandboxing")
+
+    args = parser.parse_args(argv)
+
+    # Select a printer mode:
+    def printBoth(name, url): print(name+"\t"+url)
+    def printName(name, url): print(name)
+    def printUrl(name, url): print(url)
+    if args.show == 'both':
+        printer = printBoth
+    elif args.show == 'name' or args.show == 'package':
+        printer = printName
+    elif args.show == 'url':
+        printer = printUrl
+    else:
+        print("Unknown output format '{}'.".format(args.show), file=sys.stderr)
+        exit(1)
+
+    # Do it
+    recipes = RecipeSet()
+    recipes.parse()
+    roots = recipes.generatePackages(lambda s,m: "unused", sandboxEnabled=args.sandbox).values()
+    queryRecursive(roots, "", printer, args.filter)
