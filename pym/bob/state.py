@@ -91,6 +91,12 @@ class _BobState():
                 self.__save()
             return res
 
+    def getByNameDirectoryMaybe(self, digest):
+        if digest in self.__byNameDirs:
+            return self.__byNameDirs[digest]
+        else:
+            return None
+
     def getAllNameDirectores(self):
         ret = set()
         for d in self.__byNameDirs.values():

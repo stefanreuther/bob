@@ -131,3 +131,74 @@ def doQuerySCM(argv, bobRoot):
     recipes.parse()
     roots = recipes.generatePackages(lambda s,m: "unused", sandboxEnabled=args.sandbox).values()
     queryRecursive(roots, "", printer, args.filter)
+
+def doQueryPath(argv, bobRoot):
+    # Local imports
+    from .build import LocalBuilder
+    from ..state import BobState
+    from ..utils import asHexStr
+    from ..input import walkPackagePath
+
+    # Configure the parser
+    parser = argparse.ArgumentParser(prog="bob query-path",
+                                     description="Lists all packages and their last build directory. If a package has never been built, no output is shown for that package.")
+    parser.add_argument('packages', metavar='PACKAGE', type=str, nargs='+',
+        help="(Sub-)package to build")
+    parser.add_argument('--show', help='Select output format (both, name/package, path)', default='both', metavar='MODE')
+    parser.add_argument('-D', default=[], action='append', dest="defines",
+        help="Override default environment variable")
+    parser.add_argument('-c', dest="configFile", default=[], action='append',
+        help="Use config File")
+
+    group = parser.add_mutually_exclusive_group()
+    group.add_argument('--sandbox', action='store_true', default=True,
+        help="Enable sandboxing")
+    group.add_argument('--no-sandbox', action='store_false', dest='sandbox',
+        help="Disable sandboxing")
+
+    # Parse args
+    args = parser.parse_args(argv)
+
+    # Select a printer mode
+    def printBoth(name, path): print(name+"\t"+path)
+    def printName(name, path): print(name)
+    def printPath(name, path): print(path)
+    if args.show == 'both':
+        printer = printBoth
+    elif args.show == 'name' or args.show == 'package':
+        printer = printName
+    elif args.show == 'path':
+        printer = printPath
+    else:
+        print("Unknown output format '{}'.".format(args.show), file=sys.stderr)
+        exit(1)
+
+    # Process defines
+    defines = {}
+    for define in args.defines:
+        d = define.split("=")
+        if len(d) == 1:
+            defines[d[0]] = ""
+        elif len(d) == 2:
+            defines[d[0]] = d[1]
+        else:
+            parser.error("Malformed define: "+define)
+
+    # Process the recipes
+    recipes = RecipeSet()
+    recipes.defineHook('developNameFormatter', LocalBuilder.developNameFormatter)
+    recipes.parse()
+
+    # Find the name formatter -- do we need it?
+    nameFormatter = recipes.getHook('developNameFormatter')
+    nameFormatter = LocalBuilder.makeRunnable(nameFormatter)
+    roots = recipes.generatePackages(nameFormatter, defines, args.sandbox)
+
+    # Load state
+    state = BobState()
+
+    for p in args.packages:
+        package = walkPackagePath(roots, p)
+        dir = state.getByNameDirectoryMaybe(asHexStr(package.getPackageStep().getVariantId()))
+        if dir != None:
+            printer(p, dir)
