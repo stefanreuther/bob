@@ -55,6 +55,10 @@ def __status(*args, **kwars):
      from .cmds.build import doStatus
      doStatus(*args, **kwars)
 
+def __shell(*args, **kwargs):
+     from .cmds.build import doShell
+     doShell(*args, **kwargs)
+
 def __queryscm(*args, **kwargs):
      from .cmds.misc import doQuerySCM
      doQuerySCM(*args, **kwargs)
@@ -76,6 +80,7 @@ availableCommands = {
     "ls"            : (True, __ls, "List package hierarchy"),
     "project"       : (True, __project, "Create project files"),
     "status"        : (True, __status, "Show SCM status"),
+    "shell"         : (True, __shell, "Start a shell"),
 
     "query-scm"     : (False, __queryscm, "Query SCM information"),
     "query-recipe"  : (False, __queryrecipe, "Query package sources"),

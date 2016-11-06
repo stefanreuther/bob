@@ -23,6 +23,7 @@ from ..utils import asHexStr, hashDirectory, hashFile, removePath, emptyDirector
 from datetime import datetime
 from glob import glob
 from pipes import quote
+from tempfile import NamedTemporaryFile
 import argparse
 import datetime
 import os
@@ -36,6 +37,23 @@ import subprocess
 #    ==  0: package name, package steps, stderr
 #    ==  1: package name, package steps, stderr, stdout
 #    ==  2: package name, package steps, stderr, stdout, set -x
+
+def printEnvironment(step, stepEnv, f):
+    print("# Special args:", file=f)
+    print("declare -A BOB_ALL_PATHS=( {} )".format(" ".join(sorted(
+        [ "[{}]={}".format(quote(a.getPackage().getName()),
+                           quote(a.getExecPath()))
+          for a in step.getAllDepSteps() ] ))), file=f)
+    print("declare -A BOB_DEP_PATHS=( {} )".format(" ".join(sorted(
+        [ "[{}]={}".format(quote(a.getPackage().getName()),
+                           quote(a.getExecPath()))
+          for a in step.getArguments() if a.isValid() ] ))), file=f)
+    print("declare -A BOB_TOOL_PATHS=( {} )".format(" ".join(sorted(
+        [ "[{}]={}".format(quote(t), quote(p))
+          for (t,p) in step.getTools().items()] ))), file=f)
+    print("# Environment:", file=f)
+    for (k,v) in sorted(stepEnv.items()):
+        print("export {}={}".format(k, quote(v)), file=f)
 
 class Bijection(dict):
     """Bijective dict that silently removes offending mappings"""
@@ -429,25 +447,26 @@ esac
             print("trap 'RET=$? ; echo \"\x1b[31;1mStep failed on line ${LINENO}: Exit status ${RET}; Command:\x1b[0;31m ${BASH_COMMAND}\x1b[0m\" >&2 ; exit $RET' ERR", file=f)
             print("trap 'for i in \"${_BOB_TMP_CLEANUP[@]-}\" ; do rm -f \"$i\" ; done' EXIT", file=f)
             print("", file=f)
-            print("# Special args:", file=f)
-            print("declare -A BOB_ALL_PATHS=( {} )".format(" ".join(sorted(
-                [ "[{}]={}".format(quote(a.getPackage().getName()),
-                                   quote(a.getExecPath()))
-                    for a in step.getAllDepSteps() ] ))), file=f)
-            print("declare -A BOB_DEP_PATHS=( {} )".format(" ".join(sorted(
-                [ "[{}]={}".format(quote(a.getPackage().getName()),
-                                   quote(a.getExecPath()))
-                    for a in step.getArguments() if a.isValid() ] ))), file=f)
-            print("declare -A BOB_TOOL_PATHS=( {} )".format(" ".join(sorted(
-                [ "[{}]={}".format(quote(t), quote(p))
-                    for (t,p) in step.getTools().items()] ))), file=f)
-            print("# Environment:", file=f)
-            for (k,v) in sorted(stepEnv.items()):
-                print("export {}={}".format(k, quote(v)), file=f)
+            printEnvironment(step, stepEnv, f)
             print("", file=f)
             print("# BEGIN BUILD SCRIPT", file=f)
             print(step.getScript(), file=f)
             print("# END BUILD SCRIPT", file=f)
+        setupFile = os.path.join(workspacePath, "..", "setup")
+        with open(setupFile, "w") as f:
+            printEnvironment(step, stepEnv, f)
+            print("", file=f)
+            if step.getSetupScript() is not None:
+                print("# BEGIN SETUP SCRIPT", file=f)
+                print(step.getSetupScript(), file=f)
+                print("# END SETUP SCRIPT", file=f)
+            else:
+                print("# NO SETUP SCRIPT", file=f)
+            print("", file=f)
+            print("# Positional arguments:", file=f)
+            print("set -- "+(" ".join([
+                quote(a.getExecPath())
+                for a in step.getArguments() ])), file=f)
         os.chmod(absRunFile, stat.S_IRWXU | stat.S_IRGRP | stat.S_IWGRP |
             stat.S_IROTH | stat.S_IWOTH)
         cmdLine = ["/bin/bash", runFile, "__run"]
@@ -1253,3 +1272,122 @@ been executed or does not exist), the line is omitted.
 
         # Show
         state.print()
+
+def doShell(argv, bobRoot):
+    # Local imports
+    from string import Formatter
+
+    # Configure the parser
+    parser = argparse.ArgumentParser(prog="bob shell",
+                                     description="""FIXME""")
+    parser.add_argument('packages', metavar='PACKAGE', type=str, nargs='+',
+        help="(Sub-)package to query")
+    parser.add_argument('-D', default=[], action='append', dest="defines",
+        help="Override default environment variable")
+    parser.add_argument('-c', dest="configFile", default=[], action='append',
+        help="Use config File")
+
+    group = parser.add_mutually_exclusive_group()
+    group.add_argument('--sandbox', action='store_true', help="Enable sandboxing")
+    group.add_argument('--no-sandbox', action='store_false', dest='sandbox', help="Disable sandboxing")
+    parser.set_defaults(sandbox=None)
+
+    group = parser.add_mutually_exclusive_group()
+    group.add_argument('--develop', action='store_true',  dest='dev', help="Use developer mode", default=True)
+    group.add_argument('--release', action='store_false', dest='dev', help="Use release mode")
+
+    # Parse args
+    args = parser.parse_args(argv)
+    if args.sandbox == None:
+        args.sandbox = not args.dev
+
+    # Process defines
+    defines = {}
+    for define in args.defines:
+        d = define.split("=")
+        if len(d) == 1:
+            defines[d[0]] = ""
+        elif len(d) == 2:
+            defines[d[0]] = d[1]
+        else:
+            parser.error("Malformed define: "+define)
+
+    # Process the recipes
+    recipes = RecipeSet()
+    recipes.defineHook('releaseNameFormatter', LocalBuilder.releaseNameFormatter)
+    recipes.defineHook('developNameFormatter', LocalBuilder.developNameFormatter)
+    recipes.defineHook('developNamePersister', LocalBuilder.developNamePersister)
+    recipes.setConfigFiles(args.configFile)
+    recipes.parse()
+
+    if args.dev:
+        # Develop names are stable. All we need to do is to replicate build's algorithm,
+        # and when we produce a name, check whether it exists.
+        nameFormatter = recipes.getHook('developNameFormatter')
+        developPersister = recipes.getHook('developNamePersister')
+        nameFormatter = developPersister(nameFormatter)
+    else:
+        # Release names are taken from persistence.
+        nameFormatter = LocalBuilder.releaseNameInterrogator
+    nameFormatter = LocalBuilder.makeRunnable(nameFormatter)
+
+    # Find roots
+    roots = recipes.generatePackages(nameFormatter, defines, args.sandbox)
+    if args.dev:
+        touch(roots)
+
+    # FIXME do something with multiple nonoption args.
+    if len(args.packages) != 1: parser.error("bad package count")
+    packageName = args.packages[0]
+    package = walkPackagePath(roots, packageName)
+
+    step = package.getBuildStep()
+    dir = step.getWorkspacePath()
+    if step.isValid() and (dir is not None) and os.path.isdir(dir):
+        with NamedTemporaryFile(delete=False, mode="w+t") as f:
+            tempFileName = f.name
+            print("""# Identify ourselves
+BOB_SHELL=1
+BOB_MODE={mode}
+BOB_STEP={step}
+BOB_PACKAGE={package}
+
+# Remove tempfile (shell will keep executing it)
+rm "{tmpfile}"
+
+# Load user's bashrc
+if test -f $HOME/.bashrc; then
+    . $HOME/.bashrc
+fi
+
+# Go to package directory and load setup script
+cd "{pkgdir}"
+. ../setup
+
+# Build a fancy prompt
+if test -n "$BOB_PS1"; then
+  PS1=$BOB_PS1
+else
+  _bob_package_dir=$PWD
+  _bob_prompt_function() {{
+    case "$PWD" in
+      "$_bob_package_dir")
+        PS1="[bob] $BOB_MODE $BOB_STEP @ $BOB_PACKAGE> " ;;
+      "$_bob_package_dir"/*)
+        PS1="[bob] $BOB_MODE $BOB_STEP @ $BOB_PACKAGE:${{PWD#"$_bob_package_dir/"}}> " ;;
+      *)
+        PS1="[bob] $BOB_MODE $BOB_STEP @ $BOB_PACKAGE:\w> " ;;
+    esac
+  }}
+  PROMPT_COMMAND=_bob_prompt_function
+fi
+
+""".format(mode="dev" if args.dev else "release",
+           step="build",
+           package=packageName,
+           tmpfile=tempFileName,
+           pkgdir=dir), file=f)
+        # os.execl didn't work?
+        os.system("/bin/bash --rcfile '{}' -i".format(tempFileName))
+    else:
+        raise BuildError("Package {} was not yet build.".format(packageName))

@@ -49,7 +49,7 @@ import yaml
 # Therefore the follwing defintion must be incremented virtually with any
 # change that is done in this file. If in doubt, change it. It will invalidate
 # the cached results and make sure they are re-generated.
-CACHE_VERSION = 4
+CACHE_VERSION = 5
 
 warnFilter = WarnOnce("The filter keyword is experimental and might change or vanish in the future.")
 
@@ -86,6 +86,10 @@ def checkGlobList(name, allowed):
     ok = False
     for pred in allowed: ok = pred(ok, name)
     return ok
+
+def joinScriptPair(a, b):
+    return (joinScripts([a[0], b[0]], "\n"),
+            joinScripts([a[1], b[1]], "\n"))
 
 def _isFalse(val):
     return val.strip().lower() in [ "", "0", "false" ]
@@ -589,6 +593,11 @@ class Step(metaclass=ABCMeta):
         pass
 
     @abstractmethod
+    def getSetupScript(self):
+        """FIXME doc"""
+        pass
+
+    @abstractmethod
     def getJenkinsScript(self):
         """Return the relevant parts as shell script that have no Jenkins plugin."""
         pass
@@ -898,6 +907,9 @@ class CheckoutStep(Step):
         else:
             return None
 
+    def getSetupScript(self):
+        return None
+
     def getJenkinsScript(self):
         return joinScripts([ s.asScript() for s in self.__scmList if not s.hasJenkinsPlugin() ]
             + [self.__script])
@@ -925,15 +937,19 @@ class CheckoutStep(Step):
         return self.__deterministic and all([ s.isDeterministic() for s in self.__scmList ])
 
 class RegularStep(Step):
-    def __init__(self, package, pathFormatter, sandbox, label, script=(None, None),
+    def __init__(self, package, pathFormatter, sandbox, label, script=(None, None), setupScript=(None, None),
                  digestEnv={}, env={}, tools={}, args=[]):
         self.__script = script[0]
         self.__digestScript = script[1]
+        self.__setupScript = setupScript[0]
         super().__init__(package, pathFormatter, sandbox, label, digestEnv,
                          env, tools, args)
 
     def getScript(self):
         return self.__script
+
+    def getSetupScript(self):
+        return self.__setupScript
 
     def getJenkinsScript(self):
         return self.__script
@@ -946,19 +962,19 @@ class RegularStep(Step):
         return True
 
 class BuildStep(RegularStep):
-    def __init__(self, package, pathFormatter, sandbox=None, script=(None, None),
+    def __init__(self, package, pathFormatter, sandbox=None, script=(None, None), setupScript=(None, None),
                  digestEnv={}, env={}, tools={}, args=[]):
-        super().__init__(package, pathFormatter, sandbox, "build", script,
+        super().__init__(package, pathFormatter, sandbox, "build", script, setupScript,
                          digestEnv, env, tools, args)
 
     def isBuildStep(self):
         return True
 
 class PackageStep(RegularStep):
-    def __init__(self, package, pathFormatter, sandbox=None, script=(None, None),
+    def __init__(self, package, pathFormatter, sandbox=None, script=(None, None), setupScript=(None, None),
                  digestEnv={}, env={}, tools={}, args=[]):
         self.__used = False
-        super().__init__(package, pathFormatter, sandbox, "dist", script,
+        super().__init__(package, pathFormatter, sandbox, "dist", script, setupScript,
                          digestEnv, env, tools, args)
 
     def isPackageStep(self):
@@ -1046,9 +1062,9 @@ class Package(object):
         """Return the checkout step of this package."""
         return self.__checkoutStep
 
-    def _setBuildStep(self, script, digestEnv, env, tools, args):
+    def _setBuildStep(self, script, setupScript, digestEnv, env, tools, args):
         self.__buildStep = BuildStep(
-            self, self.__pathFormatter, self.__sandbox, script, digestEnv, env,
+            self, self.__pathFormatter, self.__sandbox, script, setupScript, digestEnv, env,
             tools, args)
         return self.__buildStep
 
@@ -1056,9 +1072,9 @@ class Package(object):
         """Return the build step of this package."""
         return self.__buildStep
 
-    def _setPackageStep(self, script, digestEnv, env, tools, args):
+    def _setPackageStep(self, script, setupScript, digestEnv, env, tools, args):
         self.__packageStep = PackageStep(
-            self, self.__pathFormatter, self.__sandbox, script, digestEnv, env,
+            self, self.__pathFormatter, self.__sandbox, script, setupScript, digestEnv, env,
             tools, args)
         return self.__packageStep
 
@@ -1312,7 +1328,13 @@ class Recipe(object):
             i += 1
         self.__checkout = (checkoutScript, checkoutDigestScript, checkoutSCMs)
         self.__build = incHelper.resolve(recipe.get("buildScript"))
+        self.__buildSetup = incHelper.resolve(recipe.get("buildSetup"))
         self.__package = incHelper.resolve(recipe.get("packageScript"))
+        self.__packageSetup = incHelper.resolve(recipe.get("packageSetup"))
+
+        # Merge setup into execution part so further code needs no longer deal with the distinction
+        self.__build = joinScriptPair(self.__buildSetup, self.__build)
+        self.__package = joinScriptPair(self.__packageSetup, self.__package)
 
         # Consider checkout deterministic by default if no checkout script is
         # involved.
@@ -1382,14 +1404,10 @@ class Recipe(object):
             checkoutSCMs = scms
             # store result
             self.__checkout = (checkoutScript, checkoutDigestScript, checkoutSCMs)
-            self.__build = (
-                joinScripts([cls.__build[0], self.__build[0]]),
-                joinScripts([cls.__build[1], self.__build[1]], "\n")
-            )
-            self.__package = (
-                joinScripts([cls.__package[0], self.__package[0]]),
-                joinScripts([cls.__package[1], self.__package[1]], "\n")
-            )
+            self.__build = joinScriptPair(cls.__build, self.__build)
+            self.__buildSetup = joinScriptPair(cls.__buildSetup, self.__buildSetup)
+            self.__package = joinScriptPair(cls.__package, self.__package)
+            self.__packageSetup = joinScriptPair(cls.__packageSetup, self.__packageSetup)
             for (n, p) in self.__properties.items():
                 p.inherit(cls.__properties[n])
 
@@ -1567,7 +1585,7 @@ These dependencies constitute different variants of '{PKG}' and can therefore no
             buildDigestEnv = env.prune(self.__buildVars)
             buildEnv = ( env.prune(self.__buildVars | self.__buildVarsWeak)
                 if self.__buildVarsWeak else buildDigestEnv )
-            buildStep = p._setBuildStep(self.__build, buildDigestEnv,
+            buildStep = p._setBuildStep(self.__build, self.__buildSetup, buildDigestEnv,
                 buildEnv, tools.prune(self.__toolDepBuild), [srcStep] + results)
         else:
             buildStep = p.getBuildStep() # return invalid step
@@ -1576,7 +1594,7 @@ These dependencies constitute different variants of '{PKG}' and can therefore no
         packageDigestEnv = env.prune(self.__packageVars)
         packageEnv = ( env.prune(self.__packageVars | self.__packageVarsWeak)
             if self.__packageVarsWeak else packageDigestEnv )
-        p._setPackageStep(self.__package, packageDigestEnv, packageEnv,
+        p._setPackageStep(self.__package, self.__packageSetup, packageDigestEnv, packageEnv,
             tools.prune(self.__toolDepPackage), [buildStep])
         packageStep = p.getPackageStep()
 
@@ -2054,7 +2072,9 @@ class RecipeSet:
         classSchemaSpec = {
             schema.Optional('checkoutScript') : str,
             schema.Optional('buildScript') : str,
+            schema.Optional('buildSetup') : str,
             schema.Optional('packageScript') : str,
+            schema.Optional('packageSetup') : str,
             schema.Optional('checkoutTools') : [ toolGlobSchema ],
             schema.Optional('buildTools') : [ toolGlobSchema ],
             schema.Optional('packageTools') : [ toolGlobSchema ],
